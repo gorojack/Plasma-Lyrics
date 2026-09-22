@@ -87,6 +87,30 @@ PlasmoidItem {
             parser: (res, attempt) => {
                 return res;
             }
+        },
+        {
+            name: 'Netease',
+            baseUrl: Plasmoid.configuration.baseUrlNetease,
+            useJson: true,
+            expectedStatus: 200,
+            requestHandler: (attempt) => {
+                if (attempt === 0) {
+                    const keywords = `${title} ${artist}`.trim();
+                    return { url: `${baseUrlNetease}/api/search/get/web?csrf_token=&s=${encodeURIComponent(keywords)}&type=1&offset=0&total=true&limit=20` };
+                }
+                if (attempt === 1 && currentNeteaseSongId) {
+                    return { url: `${baseUrlNetease}/api/song/lyric?id=${encodeURIComponent(currentNeteaseSongId)}&lv=-1&kv=-1&tv=-1` };
+                }
+            },
+            parser: (res, attempt) => {
+                if (attempt === 0) {
+                    const track = selectNeteaseTrack(res);
+                    if (!track) return null;
+                    currentNeteaseSongId = String(track.id);
+                    return { nextRequest: true };
+                }
+                return res?.lrc?.lyric ?? null;
+            }
         }
     ])
 
@@ -99,6 +123,7 @@ PlasmoidItem {
     }
     readonly property string playerName: mpris2Model.currentPlayer?.identity || ''
     readonly property int position: mpris2Model.currentPlayer?.position / 1000 || 0
+    readonly property int duration: mpris2Model.currentPlayer?.length / 1000 || 0
     readonly property bool isPlaying: mpris2Model.currentPlayer?.playbackStatus === Mpris.PlaybackStatus.Playing ? true : false
     readonly property bool supportedPlayer: applications ? applications.toLowerCase().split(',').includes(playerName.toLowerCase()) : true // TODO: it would be nice if this searched for a player that matches the application name, instead of only checking the main player
 
@@ -129,7 +154,9 @@ PlasmoidItem {
     readonly property bool verticalAlignBottom: Plasmoid.configuration.verticalAlignBottom
     readonly property string baseUrlLrcLib: Plasmoid.configuration.baseUrlLrcLib
     readonly property string baseUrlLrcApi: Plasmoid.configuration.baseUrlLrcApi
+    readonly property string baseUrlNetease: Plasmoid.configuration.baseUrlNetease
     readonly property string providerPriorities: Plasmoid.configuration.providerPriorities
+    readonly property var providerNames: providerPriorities.split(',').map(name => name.trim()).filter(name => name)
     readonly property int maxAttempts: Plasmoid.configuration.maxAttempts
     readonly property string applications: Plasmoid.configuration.applications
 
@@ -138,12 +165,13 @@ PlasmoidItem {
     property string previousArtist: ''
     property string previousPlayerName: ''
     property string currentLyricText: ''
-    property string currentProvider: ''
+    property int currentProvider: 0
     property bool gettingLyrics: false
     property double lastRequestDate: 0
     property int currentLyricIndex: 0
     property int currentAttempt: 0
     property int totalAttempts: 0
+    property string currentNeteaseSongId: ''
 
     // Current lyrics
     ListModel {
@@ -234,6 +262,7 @@ PlasmoidItem {
                 currentAttempt = 0;
                 totalAttempts = 0;
                 currentProvider = 0
+                currentNeteaseSongId = '';
                 lyricsList.clear();
 
                 if (!title || !supportedPlayer) return;
@@ -297,6 +326,53 @@ PlasmoidItem {
         }
     }
 
+    function normalizeMetadata(value) {
+        return String(value || '')
+            .normalize('NFKC')
+            .toLowerCase()
+            .replace(/[\s_\-–—·.,，。:：'"“”‘’]/g, '');
+    }
+
+    function selectNeteaseTrack(response) {
+        const songs = response?.result?.songs || [];
+        const normalizedTitle = normalizeMetadata(title);
+        const normalizedArtist = normalizeMetadata(artist);
+        const normalizedAlbum = normalizeMetadata(album);
+        let bestTrack = null;
+        let bestScore = -Infinity;
+
+        for (const track of songs) {
+            const trackTitle = normalizeMetadata(track.name);
+            const trackArtists = (track.artists || track.ar || []).map(item => normalizeMetadata(item.name));
+            const trackAlbum = normalizeMetadata(track.album?.name || track.al?.name);
+            const trackDuration = track.duration || track.dt || 0;
+            let score = 0;
+
+            if (trackTitle === normalizedTitle) score += 60;
+            else if (trackTitle.includes(normalizedTitle) || normalizedTitle.includes(trackTitle)) score += 20;
+
+            if (trackArtists.some(name => name === normalizedArtist)) score += 30;
+            else if (trackArtists.some(name => name.includes(normalizedArtist) || normalizedArtist.includes(name))) score += 15;
+
+            if (normalizedAlbum && trackAlbum === normalizedAlbum) score += 15;
+
+            if (duration > 0 && trackDuration > 0) {
+                const durationDifference = Math.abs(duration - trackDuration);
+                if (durationDifference <= 3000) score += 20;
+                else if (durationDifference <= 10000) score += 5;
+                else if (durationDifference > 30000) score -= 30;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestTrack = track;
+            }
+        }
+
+        logDebug(`Best NetEase match scored ${bestScore}`);
+        return bestScore >= 70 ? bestTrack : null;
+    }
+
     function updateLyrics() {
         gettingLyrics = true;
 
@@ -318,11 +394,25 @@ PlasmoidItem {
             }
         }
 
-        const provider = providers.find(provider => provider.name === providerPriorities.split(',')[currentProvider]);
+        const providerName = providerNames[currentProvider];
+        const provider = providers.find(provider => provider.name === providerName);
+
+        if (!provider) {
+            console.warn(`Unknown lyric provider '${providerName}'`);
+            if (providerNames[++currentProvider]) {
+                currentAttempt = 0;
+                return updateLyrics();
+            }
+            gettingLyrics = false;
+            currentAttempt = 0;
+            totalAttempts = 0;
+            return;
+        }
+
         const requestOptions = provider.requestHandler(currentAttempt);
 
         if (!requestOptions || totalAttempts >= maxAttempts) {
-            if (providerPriorities.split(',')[++currentProvider]) {
+            if (providerNames[++currentProvider]) {
                 currentAttempt = 0;
                 return updateLyrics();
             } else {
@@ -356,13 +446,20 @@ PlasmoidItem {
                     } catch (err) { };
                 }
 
-                const lyrics = xhr.status === provider.expectedStatus && provider.parser(responseJson ?? responseText);
+                const result = xhr.status === provider.expectedStatus && provider.parser(responseJson ?? responseText, currentAttempt);
 
-                if (!lyrics) {
+                if (result?.nextRequest) {
+                    currentAttempt++;
+                    return updateLyrics();
+                }
+
+                if (!result) {
                     currentAttempt++;
                     totalAttempts++;
                     return updateLyrics();
                 }
+
+                const lyrics = result;
 
 
                 // Got synced lyrics

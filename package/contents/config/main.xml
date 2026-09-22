@@ -60,6 +60,9 @@
         <entry name="baseUrlLrcApi" type="String">
             <default>https://api.lrc.cx</default>
         </entry>
+        <entry name="baseUrlNetease" type="String">
+            <default>https://music.163.com</default>
+        </entry>
         <!-- <entry name="baseUrlJellyfin" type="String">
             <default></default>
         </entry>
