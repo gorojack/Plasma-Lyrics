@@ -10,8 +10,11 @@ PlasmoidItem {
 
     preferredRepresentation: compactRepresentation
 
-    Layout.preferredWidth: useFixedSize ? fixedWidth : implicitWidth
-    Layout.preferredHeight: useFixedSize ? fixedHeight : implicitHeight
+    // In automatic mode the content must provide the layout hint. Using this
+    // PlasmoidItem's own implicit size here leaves the panel-assigned width in
+    // control, so changing the lyric cannot resize the applet.
+    Layout.preferredWidth: useFixedSize ? fixedWidth : lyricText.implicitWidth + margin * 2
+    Layout.preferredHeight: useFixedSize ? fixedHeight : lyricText.implicitHeight + margin * 2
     Layout.minimumWidth: Layout.preferredWidth
     Layout.minimumHeight: Layout.preferredHeight
 
@@ -155,7 +158,9 @@ PlasmoidItem {
     Text {
         id: lyricText
         color: fontColor
-        wrapMode: Text.Wrap
+        // Wrapping needs a fixed width. In automatic mode use the unwrapped
+        // natural width so the panel can grow and shrink with each lyric.
+        wrapMode: useFixedSize ? Text.Wrap : Text.NoWrap
         horizontalAlignment:
             horizontalAlignLeft ? Text.AlignLeft :
             horizontalAlignCenter ? Text.AlignHCenter :
